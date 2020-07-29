@@ -10,10 +10,10 @@ namespace Divante\VsbridgeIndexerCore\Console\Command;
 
 use Divante\VsbridgeIndexerCore\Indexer\StoreManager;
 use Divante\VsbridgeIndexerCore\Api\IndexOperationInterface;
-use Divante\VsbridgeIndexerCore\Api\Index\IndexOperationProviderInterface;
 use Divante\VsbridgeIndexerCore\Model\IndexerRegistry;
 use Magento\Framework\App\ObjectManagerFactory;
 use Magento\Framework\Console\Cli;
+use Magento\Framework\Event\ManagerInterface;
 use Magento\Framework\Exception\LocalizedException;
 use Magento\Framework\Indexer\IndexerInterface;
 use Magento\Indexer\Console\Command\AbstractIndexerCommand;
@@ -60,17 +60,25 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
     private $excludeIndices = [];
 
     /**
+     * @var ManagerInterface
+     */
+    private $eventManager;
+
+    /**
      * RebuildEsIndexCommand constructor.
      *
-     * @param ObjectManagerFactory $objectManagerFactory
-     * @param array $excludeIndices
+     * @param  ObjectManagerFactory  $objectManagerFactory
+     * @param  ManagerInterface  $eventManager
+     * @param  array  $excludeIndices
      */
     public function __construct(
         ObjectManagerFactory $objectManagerFactory,
+        ManagerInterface $eventManager, // Proxy
         array $excludeIndices = []
     ) {
         $this->excludeIndices = $excludeIndices;
         parent::__construct($objectManagerFactory);
+        $this->eventManager = $eventManager;
     }
 
     /**
@@ -112,7 +120,7 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
 
         if (!empty($invalidIndices)) {
             $message = 'Some indices has invalid status: '. implode(', ', $invalidIndices) . '. ';
-            $message .= 'Please change indices status to VALID manually.';
+            $message .= 'Please change indices status to VALID manually or use bin/magento vsbridge:reset command.';
             $output->writeln("<info>WARNING: Indexation can't be executed. $message</info>");
             return;
         }
@@ -152,6 +160,10 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
      */
     private function reindex(OutputInterface $output, $storeId, $allStores)
     {
+        $this->eventManager->dispatch('vsbridge_indexer_reindex_before', [
+            'storeId' => $storeId,
+            'allStores' => $allStores,
+        ]);
 
         if ($storeId) {
             $store = $this->getStoreManager()->getStore($storeId);
@@ -182,6 +194,11 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
             // If failure returned in any store return failure now
             return in_array(Cli::RETURN_FAILURE, $returnValues) ? Cli::RETURN_FAILURE : Cli::RETURN_SUCCESS;
         }
+
+        $this->eventManager->dispatch('vsbridge_indexer_reindex_after', [
+            'storeId' => $storeId,
+            'allStores' => $allStores,
+        ]);
     }
 
     /**
@@ -215,10 +232,8 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
      */
     private function reindexStore(StoreInterface $store, OutputInterface $output)
     {
-        $indexOperations = $this->getIndexOperationProvider()->getOperationByStore($store->getId());
-
         $this->getIndexerStoreManager()->override([$store]);
-        $index = $indexOperations->createIndex(self::INDEX_IDENTIFIER, $store);
+        $index = $this->getIndexOperations()->createIndex(self::INDEX_IDENTIFIER, $store);
         $this->getIndexerRegistry()->setFullReIndexationIsInProgress();
 
         $returnValue = Cli::RETURN_FAILURE;
@@ -241,10 +256,10 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
             }
         }
 
-        $indexOperations->switchIndexer($index->getName(), $index->getIdentifier());
+        $this->getIndexOperations()->switchIndexer($store->getId(), $index->getName(), $index->getAlias());
 
         $output->writeln(
-            sprintf('<info>Index name: %s, index alias: %s</info>', $index->getName(), $index->getIdentifier())
+            sprintf('<info>Index name: %s, index alias: %s</info>', $index->getName(), $index->getAlias())
         );
 
         return $returnValue;
@@ -316,12 +331,12 @@ class RebuildEsIndexCommand extends AbstractIndexerCommand
     }
 
     /**
-     * @return IndexOperationProviderInterface
+     * @return IndexOperationInterface
      */
-    private function getIndexOperationProvider()
+    private function getIndexOperations()
     {
         if (null === $this->indexOperations) {
-            $this->indexOperations = $this->getObjectManager()->get(IndexOperationProviderInterface::class);
+            $this->indexOperations = $this->getObjectManager()->get(IndexOperationInterface::class);
         }
 
         return $this->indexOperations;
